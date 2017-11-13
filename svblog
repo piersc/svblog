@@ -1,0 +1,267 @@
+#!/usr/bin/python
+
+import boto3
+import ConfigParser
+import os
+import os.path
+import optparse
+import sys
+import datetime
+import glob
+import re
+import requests
+import time
+import urllib2
+
+
+version = "0.1"
+
+def read_config():
+    Config = ConfigParser.ConfigParser()
+
+    try:
+        Config.read("svblog.cfg")
+        base_url = Config.get("svblog", "base_url")
+        posts_path = Config.get("svblog", "posts_path")
+        s3_bucket = Config.get("svblog", "s3_bucket")
+        return { "base_url": base_url, "posts_path": posts_path, "s3_bucket": s3_bucket }
+    except:
+        print "Config parsing problem"
+
+def print_config():
+    for i in config:
+        print i + ": " + config[i]
+
+def report_error(message):
+    sys.stderr.write("\033[91m%s\n\033[0m" % message)
+
+def action_post(filename, title, date, upload):
+    # Create post filename
+    page_name = title.replace(" ", "-").lower() + ".html"
+    # Remove characters that can't be in a filename
+    page_name = re.sub(r'!|\?|,|\'|\(|\)|\"', '', page_name)
+
+    # Read in the post contents (from file provided by -f FILENAME)
+    f = open(filename, 'r')
+    post = f.read()
+    f.close()
+
+    # Add the header and footer to the post
+    f = open("post-template-header.txt", 'r')
+    post = f.read() + post
+    f.close()
+    f = open("post-template-footer.txt", 'r')
+    post = post + f.read()
+    f.close()
+
+    # Replace VARS in post (date, title)
+    s = time.strptime(date, "%Y%m%d")
+    date_friendly = time.strftime("%d %b", s)
+    post = post.replace("DATEVAR", date)
+    post = post.replace("DATEFVAR", date_friendly)
+    post = post.replace("TITLEVAR", title)
+
+    # Get the page template
+    page_tmpl = get_page_template()
+
+    # Insert the post
+    page_tmpl = page_tmpl.replace("POSTVAR", post)
+
+    # Save post to disk e.g. posts/example-post.html
+    f = open('%s/%s' % (config["posts_path"], page_name), 'w')
+    f.write(page_tmpl)
+    f.close()
+
+    print 'Post saved to %s/%s.' % (config["posts_path"], page_name)
+    print 'Post date set to %s - %s' % (date, date_friendly)
+    if upload:
+        action_upload_post(config["posts_path"] + '/' + page_name)
+    else:
+        print 'Use  svblog -a upload-post -f "%s/%s"  to save to S3' % (config["posts_path"], page_name)
+
+def action_upload_post(location):
+    # Upload local file at location to S3
+    s3 = boto3.client('s3')
+    s3.upload_file(location, config["s3_bucket"], location, ExtraArgs={'ContentType': 'text/html'})
+    print 'Post uploaded and available at ' + config["base_url"] + "/" + location
+
+def get_post_template():
+    # Just print out an example post, makes it easy to copy code tags, formatting
+    print "Here's a template for your post:\n"
+    f = open("post-template.txt", "r")
+    print f.read()
+    f.close()
+
+def get_page_template():
+    # Return the page template
+    f = open("page-template.txt", "r")
+    page_tmpl = f.read()
+    f.close()
+    return page_tmpl
+
+def make_index(upload):
+    # To create the index we'll first pull all existing live posts to /posts, then
+    # recreate the index page from the metadata in those files
+
+    index_entries = []
+    index_name = "index.html"
+
+    # Pull all existing posts from S3 to /posts
+    s3_get()
+
+    # Index header
+    index_text = "<div class='post'><ul class='index'>"
+
+    # Index template
+    index_entry_tmpl = "<li><h1><a href='%s/POSTVAR'>DATEVAR: TITLEVAR</a></h1></li>\n" % config["posts_path"]
+
+    # For each file in posts/, extract metadata and build an index entry
+    for filename in os.listdir('posts'):
+        f = open(config["posts_path"] + "/" + filename, 'r')
+        title_text = "Default title"
+        date_text = "1st Jan"
+        date_long = "20170101"
+        for i in f.readlines():
+            if "<!-- DATE:" in i:
+                date_text = i.split(':')[1]
+                date_long = i.split(':')[2]
+            if "<!-- TITLE:" in i:
+                title_text = i.split(':')[1]
+
+        e = index_entry_tmpl.replace('POSTVAR', filename)
+        e = e.replace('TITLEVAR', title_text)
+        e = e.replace('DATEVAR', date_text)
+        index_entries.append( { "date": date_long, "entry": e } )
+
+    # Create index from the set of entries sorted by post date
+    index_entries = sorted(index_entries, key=lambda k: k["date"], reverse=True)
+
+    for i in index_entries:
+        index_text = index_text + i["entry"]
+
+    # Index footer
+    index_text = index_text + "</ul></div>"
+
+    # Build the index page
+    index_page = get_page_template()
+    index_page = index_page.replace('POSTVAR', index_text)
+
+    f = open(index_name, "w")
+    f.write(index_page)
+    f.close()
+
+    print "Index page written to " + index_name
+
+    if upload:
+        action_upload_post(index_name)
+
+def s3_get():
+    # Get a listing of all files in S3 under /posts and save them locally
+    # to /posts by getting them using HTTP
+    # 
+    # Needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars to be set
+    s3 = boto3.resource('s3')
+    bucket = s3.Bucket(config["s3_bucket"])
+
+    # Find objects begining with posts/ and download them
+    for obj in bucket.objects.all():
+        if obj.key.startswith(config["posts_path"] + "/") and obj.key.endswith(".html"):
+            get_path = config["base_url"] + "/" + obj.key
+            print "downloading from " + get_path
+            # Need to set a UA to avoid a 403 error
+            req = urllib2.Request(get_path, headers={'User-Agent' : "svblog"})
+            con = urllib2.urlopen(req)
+            f = open(obj.key, 'w')
+            print "writing local file " + obj.key
+            f.write(con.read())
+            f.close()
+
+def action_change_page_template(filename, upload):
+     # Strip the post content out, and resave the file with a new template
+     metabegin = '<!-- POSTSTART -->'
+     begin = '<!-- POSTCONTENTSTART -->'
+     end = '<!-- POSTCONTENTEND -->'
+     post = ""
+     title_text = "Default title" 
+     date_text = "20170101"
+
+     f = open(filename, 'r')
+     for l in f:
+         if l.startswith(metabegin): break
+     # We've found the metadata start (we'll extract the title and date)
+     for l in f:
+         if "<!-- DATE:" in l:
+             date_text = l.split(':')[2]
+         if "<!-- TITLE:" in l:
+             title_text = l.split(':')[1]
+         if l.startswith(begin): break
+     # At this point we've found the start of the post
+     for l in f:
+         if l.startswith(end): break
+         post = post + l
+     f.close()
+
+     # Write post to temporary location so we can reuse post function
+     f = open("tmppost.txt", 'w')
+     f.write(post)
+     f.close()
+
+     action_post("tmppost.txt", title_text, date_text, upload)
+
+
+desc = "Serverless blog tool"
+usage = "%prog -a ACTION [options]"
+cur_date = time.strftime("%Y%m%d")
+
+parser = optparse.OptionParser(description=desc, usage=usage)
+
+parser.add_option("-V", "--version",
+                  action="store_true", dest="print_version", default=False,
+                  help="print version")
+parser.add_option('-a', '--action', dest='action',
+                  help='action: post, get-template, make-index, get-s3, upload-post, change-page-template')
+parser.add_option('-f', '--filename', dest='filename',
+                  help='full path to file')
+parser.add_option('-t', '--title', dest='title',
+                  help='post title')
+parser.add_option('-d', '--date', dest='date', default=cur_date,
+                  help='override date, format like 20170130 (otherwise defaults to today)')
+parser.add_option('-u', '--upload', action="store_true", dest='upload', default=False,
+                  help='with  post  or  change-page-template  or  make-index, upload to S3 as well')
+
+if len(sys.argv[1:])==0:
+    parser.print_help()
+    parser.exit()
+
+(options, args) = parser.parse_args()
+
+if options.print_version:
+    print "svblog %s" % version
+    sys.exit(0)
+
+config = read_config()
+
+if options.action == 'post':
+    if options.filename and options.title:
+        action_post(options.filename, options.title, options.date, options.upload)
+    else:
+        report_error('post action requires filename and title')
+        sys.exit(1)
+elif options.action == 'get-template':
+    get_post_template()
+elif options.action == 'make-index':
+    make_index(options.upload)
+elif options.action == 'get-s3':
+    s3_get()
+elif options.action == 'upload-post':
+    if options.filename:
+        action_upload_post(options.filename)
+    else:
+        report_error('upload-post action requires filename, e.g. posts/example.html')
+elif options.action == 'change-page-template':
+    if options.filename:
+        action_change_page_template(options.filename, options.upload)
+    else:
+        report_error('upload-post action requires filename, e.g. posts/example.html')
+elif options.action == 'print-config':
+    print_config()

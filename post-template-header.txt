@@ -1,0 +1,7 @@
+<div class="post">
+<!-- DATE:DATEFVAR:DATEVAR: -->
+<!-- TITLE:TITLEVAR: -->
+
+<h1><a href="#DATEVAR" id="DATEVAR">DATEFVAR</a>: TITLEVAR</h1>
+
+<!-- POSTCONTENTSTART -->
