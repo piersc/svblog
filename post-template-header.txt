@@ -1,6 +1,7 @@
 <div class="post">
 <!-- DATE:DATEFVAR:DATEVAR: -->
 <!-- TITLE:TITLEVAR: -->
+<script type="text/javascript">document.title="TITLEVAR"</script>
 
 <h1><a href="#DATEVAR" id="DATEVAR">DATEFVAR</a>: TITLEVAR</h1>
 
