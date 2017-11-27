@@ -262,6 +262,6 @@ elif options.action == 'change-page-template':
     if options.filename:
         action_change_page_template(options.filename, options.upload)
     else:
-        report_error('upload-post action requires filename, e.g. posts/example.html')
+        report_error('change-page-template action requires filename, e.g. posts/example.html')
 elif options.action == 'print-config':
     print_config()
